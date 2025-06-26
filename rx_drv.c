@@ -1,4 +1,4 @@
-/* rx_drv.c - RX 측 드라이버 */
+/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -10,7 +10,6 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
-#include <linux/delay.h> 
 
 #define DEVICE_NAME "speed_ctrl_rx"
 #define CLASS_NAME  "sysprog_rx"
@@ -97,6 +96,8 @@ static void handle_frame(unsigned char *frame) {
 static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id) {
     if (!rx_active) return IRQ_HANDLED;
 
+    DBG("CLK IRQ: triggered");
+
     int bit = gpiod_get_value(data_in);
     int byte_idx = bit_pos / 8;
     rx_buf[byte_idx] <<= 1;
@@ -161,7 +162,7 @@ static int __init rx_init(void) {
     ret = cdev_add(&rx_cdev, dev_num, 1);
     if (ret) return ret;
 
-    rx_class = class_create( CLASS_NAME);
+    rx_class = class_create(CLASS_NAME);
     device_create(rx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
     data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_IN);
@@ -175,7 +176,11 @@ static int __init rx_init(void) {
     gpiod_direction_output(clk_out, 0);
 
     irq_clk_tx = gpiod_to_irq(clk_in);
-    request_irq(irq_clk_tx, clk_tx_irq_handler, IRQF_TRIGGER_RISING, "clk_tx_irq", NULL);
+    ret = request_irq(irq_clk_tx, clk_tx_irq_handler, IRQF_TRIGGER_RISING, "clk_tx_irq", NULL);
+    if (ret) {
+        pr_err("[RX_DRV][ERROR] IRQ request failed: %d\n", ret);
+        return ret;
+    }
 
     INIT_DELAYED_WORK(&decay_work, decay_function);
     schedule_delayed_work(&decay_work, HZ);
