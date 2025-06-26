@@ -1,4 +1,4 @@
-/* tx_app.c - TX 응답 모니터링 애플리케이션 (버튼 처리 제거됨) */
+/* tx_app.c - TX 앱 (버튼 없이 엔터키로 명령 전송) */
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -37,8 +37,19 @@ int main() {
     fcntl(fd_dev, F_SETOWN, getpid());
     fcntl(fd_dev, F_SETFL, O_ASYNC | O_NONBLOCK);
 
-    printf("[TX_APP] 응답 수신 대기 중 (SIGIO)...\n");
-    while (1) pause();
+    printf("[TX_APP] Enter키 입력 시 명령을 전송합니다. (CTRL+C to quit)\n");
+
+    while (1) {
+        printf("\n[TX_APP] 전송하려면 Enter를 누르세요 > ");
+        getchar();
+
+        unsigned char frame[FRAME_SIZE] = {0xAA, 0x01, 10, 0};
+        frame[3] = frame[0] ^ frame[1] ^ frame[2];
+        write(fd_dev, frame, FRAME_SIZE);
+
+        printf("[TX_APP][SEND] frame: %02X %02X %02X %02X\n",
+               frame[0], frame[1], frame[2], frame[3]);
+    }
 
     close(fd_dev);
     return 0;
