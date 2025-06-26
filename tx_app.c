@@ -48,9 +48,9 @@ int main() {
             got_ack = 0;
             if (read(fd, ack, FRAME_LEN) == FRAME_LEN)
                 printf("[ACK] speed=%d, state=%s\n",
-                    ack[1],
-                    ack[2]==1 ? "ACCEL" :
-                    ack[2]==2 ? "LIMITED" : "IDLE");
+                       ack[1],
+                       ack[2]==1 ? "ACCEL" :
+                       ack[2]==2 ? "LIMITED" : "IDLE");
         }
     }
 

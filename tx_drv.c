@@ -2,12 +2,11 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/gpio/consumer.h>
-#include <linux/interrupt.h>
-#include <linux/fs.h>
+#include <linux/fs.h>               // fasync_helper, file_operations
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
-#include <linux/fasync.h>
+#include <linux/interrupt.h>
+#include <linux/gpio/consumer.h>
 #include <linux/wait.h>
 #include <linux/delay.h>
 
