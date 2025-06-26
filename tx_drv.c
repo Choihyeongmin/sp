@@ -1,4 +1,4 @@
-/* tx_drv.c - TX 측 드라이버 (버튼 제거, ACK 수신만) */
+/* tx_drv.c - TX 측 드라이버 (버튼 제거, ACK 수신만, 타이밍 안정화) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -44,20 +44,17 @@ static unsigned char rx_frame[FRAME_SIZE];
 static int bit_pos = 0;
 
 static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
-    if (bit_pos == 0)
-        memset(rx_frame, 0, sizeof(rx_frame));
+    if (bit_pos >= 32) {
+        bit_pos = 0;
+        DBG("bit_pos overflow, reset");
+        return IRQ_HANDLED;
+    }
 
     int bit = gpiod_get_value(data_in);
     int byte_idx = bit_pos / 8;
     rx_frame[byte_idx] <<= 1;
     rx_frame[byte_idx] |= (bit & 0x1);
     bit_pos++;
-
-    if (bit_pos > FRAME_SIZE * 8) {
-        DBG("Bit overflow — resetting");
-        bit_pos = 0;
-        return IRQ_HANDLED;
-    }
 
     if (bit_pos == 32) {
         DBG("ACK received: %02X %02X %02X %02X", rx_frame[0], rx_frame[1], rx_frame[2], rx_frame[3]);
@@ -70,6 +67,7 @@ static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
 
 static void send_frame(unsigned char *frame) {
     DBG("TX sending frame: %02X %02X %02X %02X", frame[0], frame[1], frame[2], frame[3]);
+    msleep(10); // RX가 준비될 시간 확보
     for (int i = 0; i < FRAME_SIZE; i++) {
         unsigned char ch = frame[i];
         for (int b = 7; b >= 0; b--) {
@@ -77,18 +75,11 @@ static void send_frame(unsigned char *frame) {
             gpiod_set_value(data_out, bit);
             udelay(10);
             gpiod_set_value(clk_out, 1);
-            udelay(100);
+            udelay(200);  // 안정적 수신을 위한 클럭 하이 지연 증가
             gpiod_set_value(clk_out, 0);
+            udelay(10);
         }
     }
-}
-
-static ssize_t tx_read(struct file *filp, char __user *buf, size_t len, loff_t *off) {
-    if (len < FRAME_SIZE)
-        return -EINVAL;
-    if (copy_to_user(buf, rx_frame, FRAME_SIZE))
-        return -EFAULT;
-    return FRAME_SIZE;
 }
 
 static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) {
@@ -97,8 +88,15 @@ static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, l
         return -EINVAL;
     if (copy_from_user(frame, buf, FRAME_SIZE))
         return -EFAULT;
-
     send_frame(frame);
+    return FRAME_SIZE;
+}
+
+static ssize_t tx_read(struct file *filp, char __user *buf, size_t len, loff_t *off) {
+    if (len < FRAME_SIZE)
+        return -EINVAL;
+    if (copy_to_user(buf, rx_frame, FRAME_SIZE))
+        return -EFAULT;
     return FRAME_SIZE;
 }
 
