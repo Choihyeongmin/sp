@@ -46,9 +46,6 @@ int main() {
         unsigned char frame[FRAME_SIZE] = {0xAA, 0x01, 10, 0};
         frame[3] = frame[0] ^ frame[1] ^ frame[2];
         write(fd_dev, frame, FRAME_SIZE);
-
-        printf("[TX_APP][SEND] frame: %02X %02X %02X %02X\n",
-               frame[0], frame[1], frame[2], frame[3]);
     }
 
     close(fd_dev);
