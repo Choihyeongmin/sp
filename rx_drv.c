@@ -136,13 +136,21 @@ static void decay_function(struct work_struct *work)
 
     if (time_after(jiffies, last_recv_time + 2 * HZ) && current_speed > 0) {
         current_speed -= 10;
-        if (current_speed < 0)
+        if (current_speed < 0){
             current_speed = 0;
-        current_state = (current_speed == 0 ? IDLE : DECEL);
-        DBG("Speed decayed: %d, state=%d",
-            current_speed, current_state);
+            return;
+        }else if(current_speed==0){
+            current_state=IDLE;
+            ack_buf[0] = 0x55;
+            ack_buf[1] = (unsigned char)current_speed;
+            ack_buf[2] = (unsigned char)current_state;
+            ack_buf[3] = ack_buf[0] ^ ack_buf[1] ^ ack_buf[2];
+            schedule_work(&ack_work);
+            return;
+        }
 
         if (current_state != IDLE) {
+            current_state=DECEL;
             ack_buf[0] = 0x55;
             ack_buf[1] = (unsigned char)current_speed;
             ack_buf[2] = (unsigned char)current_state;
