@@ -49,7 +49,7 @@ static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
         DBG("bit_pos overflow, reset");
         return IRQ_HANDLED;
     }
-    DBG("Second CLK IRQ: triggered");
+    DBG("Second CLK IRQ [%d]", bit_pos);
 
     int bit = gpiod_get_value(data_in);
     int byte_idx = bit_pos / 8;
