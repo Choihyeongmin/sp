@@ -1,4 +1,4 @@
-=/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 및 타이밍 보정 (deferred ACK via workqueue, open/close 기반 decay) */
+/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 및 타이밍 보정 (deferred ACK via workqueue, open/close 기반 decay) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
