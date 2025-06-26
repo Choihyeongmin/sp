@@ -10,6 +10,7 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
+#include <linux/delay.h>
 
 #define DEVICE_NAME "speed_ctrl_rx"
 #define CLASS_NAME  "sysprog_rx"
