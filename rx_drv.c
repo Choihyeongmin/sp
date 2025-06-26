@@ -75,10 +75,10 @@ static void send_ack(void) {
     DBG("ACK sent: %02X %02X %02X %02X", ack[0], ack[1], ack[2], ack[3]);
 }
 
-static void handle_frame(unsigned char *frame) {
+static bool handle_frame(unsigned char *frame) {
     if ((frame[0] ^ frame[1] ^ frame[2]) != frame[3]) {
         DBG("Checksum error");
-        return;
+        return false;
     }
 
     int cmd = frame[1];
@@ -95,8 +95,7 @@ static void handle_frame(unsigned char *frame) {
             break;
     }
     DBG("FSM updated: speed=%d, state=%d", current_speed, current_state);
-
-    send_ack();
+    return true;
 }
 
 static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id) {
@@ -112,7 +111,9 @@ static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id) {
 
     if (bit_pos == 32) {
         DBG("CMD received: %02X %02X %02X %02X", rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
-        handle_frame(rx_buf);
+        if(handle_frame(rx_buf)){
+            send_ack();
+        }
         bit_pos = 0;
     }
     return IRQ_HANDLED;
