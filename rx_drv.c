@@ -194,7 +194,6 @@ static const struct file_operations rx_fops = {
     .open    = rx_open,
     .release = rx_release,
     .read    = rx_read,
-    .llseek  = noop_llseek,
 };
 
 static int __init rx_init(void)
