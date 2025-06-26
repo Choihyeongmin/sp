@@ -73,6 +73,7 @@ static void send_frame(unsigned char *frame) {
     for (int i = 0; i < FRAME_SIZE; i++) {
         unsigned char ch = frame[i];
         for (int b = 7; b >= 0; b--) {
+            DBG("asdf asdgadsgjsdgkj");
             int bit = (ch >> b) & 1;
             gpiod_set_value(data_out, bit);
             udelay(10);
