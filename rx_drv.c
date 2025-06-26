@@ -50,7 +50,6 @@ static unsigned long last_recv_time;
 static struct delayed_work decay_work;
 
 static void send_ack(void) {
-    msleep(1); // send_ack() 전에 삽입
     unsigned char ack[4];
 
     ack[0] = 0x55;
@@ -94,6 +93,7 @@ static void handle_frame(unsigned char *frame) {
             DBG("Unknown CMD: %02X", cmd);
             break;
     }
+    msleep(1); // send_ack() 전에 삽입
 
     DBG("FSM updated: speed=%d, state=%d", current_speed, current_state);
     send_ack();
