@@ -1,4 +1,4 @@
-/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 */
+/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 및 타이밍 보정 */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -61,10 +61,11 @@ static void send_ack(void) {
         for (int b = 7; b >= 0; b--) {
             int bit = (ch >> b) & 1;
             gpiod_set_value(data_out, bit);
-            udelay(10);
+            udelay(20);
             gpiod_set_value(clk_out, 1);
-            udelay(100);
+            udelay(300);
             gpiod_set_value(clk_out, 0);
+            udelay(20);
         }
     }
     DBG("ACK sent: %02X %02X %02X %02X", ack[0], ack[1], ack[2], ack[3]);
