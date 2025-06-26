@@ -1,4 +1,4 @@
-/* tx_drv.c - TX 측 드라이버 (버튼 제거, ACK 수신만) */
+/* tx_drv.c - TX 측 드라이버 (버튼 제거, write()로 프레임 전송 + ACK 수신) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -82,6 +82,19 @@ static ssize_t tx_read(struct file *filp, char __user *buf, size_t len, loff_t *
     return FRAME_SIZE;
 }
 
+static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) {
+    unsigned char frame[FRAME_SIZE];
+
+    if (len < FRAME_SIZE)
+        return -EINVAL;
+
+    if (copy_from_user(frame, buf, FRAME_SIZE))
+        return -EFAULT;
+
+    send_frame(frame);
+    return FRAME_SIZE;
+}
+
 static int tx_open(struct inode *inode, struct file *filp) {
     return 0;
 }
@@ -97,6 +110,7 @@ static int tx_fasync(int fd, struct file *filp, int mode) {
 static struct file_operations tx_fops = {
     .owner = THIS_MODULE,
     .read = tx_read,
+    .write = tx_write,
     .open = tx_open,
     .release = tx_release,
     .fasync = tx_fasync,
@@ -104,7 +118,7 @@ static struct file_operations tx_fops = {
 
 static int __init tx_init(void) {
     int ret;
-    
+
     ret = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
     if (ret < 0) return ret;
     major = MAJOR(dev_num);
