@@ -1,249 +1,206 @@
-// rx_drv.c
+/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 */
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/cdev.h>
+#include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 #include <linux/timer.h>
+#include <linux/jiffies.h>
 #include <linux/delay.h>
-#include <linux/fs.h>
-#include <linux/cdev.h>
-#include <linux/uaccess.h>
-#include <linux/fasync.h>
-#include <linux/wait.h>
 
-#define START_BYTE_RESP    0x5A
-#define TIMEOUT_MS         1000    // 1초 무입력 시 감속
-#define DECEL_STEP         5       // km/h 단위 감속
-#define FRAME_LEN          4
+#define DEVICE_NAME "speed_ctrl_rx"
+#define CLASS_NAME  "sysprog_rx"
 
-// 하드코딩된 BCM 핀 번호
-#define RX_CMD_DATA_PIN    17  // RX 수신 데이터
-#define RX_CMD_CLK_PIN     22  // RX 수신 클럭
-#define RX_ACK_DATA_PIN     5  // ACK 송신 데이터
-#define RX_ACK_CLK_PIN     13  // ACK 송신 클럭
+#define BCM_DATA_TX_IN   17
+#define BCM_CLK_TX_IN    22
+#define BCM_DATA_RX_OUT  5
+#define BCM_CLK_RX_OUT   13
 
-#define DEV_NAME_RX       "speed_rx"
+#define GPIOCHIP_BASE 512
+#define FRAME_SIZE 4
 
-static struct gpio_desc *g_rx_data, *g_rx_clk;
-static struct gpio_desc *g_ack_data, *g_ack_clk;
-static int              rx_irq;
-static struct timer_list decel_timer;
+#define DEBUG
+#ifdef DEBUG
+#define DBG(fmt, ...) printk(KERN_INFO "[RX_DRV][DEBUG] " fmt "\n", ##__VA_ARGS__)
+#else
+#define DBG(fmt, ...)
+#endif
 
-static int   current_speed = 0;
-static int   speed_state   = 0;   // 0=IDLE,1=ACCEL,2=LIMITED
-static unsigned char rx_buf[FRAME_LEN];
-static int   bit_cnt = 0, byte_cnt = 0;
+enum state_code { IDLE = 0x00, ACCEL = 0x01, DECEL = 0x02, LIMITED = 0x03 };
+static enum state_code current_state = IDLE;
+static int current_speed = 0;
+static int rx_active = 0;
 
-// char device
-static dev_t           rx_devt;
-static struct cdev     rx_cdev;
-static struct class   *rx_class;
-static wait_queue_head_t rx_wq;
-static struct fasync_struct *rx_async;
-static unsigned char   event_buf[2];
-static bool            event_pending = false;
+static struct class *rx_class;
+static struct gpio_desc *data_in, *clk_in;
+static struct gpio_desc *data_out, *clk_out;
+static int major;
+static dev_t dev_num;
+static struct cdev rx_cdev;
 
-static unsigned char checksum(const unsigned char *b, int len)
-{
-    unsigned char cs = 0;
-    for (int i = 0; i < len; i++)
-        cs ^= b[i];
-    return cs;
-}
+static int irq_clk_tx = -1;
+static unsigned char rx_buf[FRAME_SIZE];
+static int bit_pos = 0;
+static unsigned long last_recv_time;
 
-// ACK 프레임 bit-bang 송신
-static void send_ack_frame(void)
-{
-    unsigned char frame[FRAME_LEN] = {
-        START_BYTE_RESP,
-        (unsigned char)(current_speed & 0xFF),
-        (unsigned char)(speed_state   & 0xFF),
-        0
-    };
-    frame[3] = checksum(frame, 3);
+static struct delayed_work decay_work;
 
-    for (int i = 0; i < FRAME_LEN; i++) {
-        for (int j = 7; j >= 0; j--) {
-            gpiod_set_value(g_ack_data, (frame[i] >> j) & 1);
-            gpiod_set_value(g_ack_clk,  1);
-            udelay(1);
-            gpiod_set_value(g_ack_clk,  0);
-            udelay(1);
+static void send_ack(void) {
+    unsigned char ack[4];
+    ack[0] = 0x55;
+    ack[1] = (unsigned char)current_speed;
+    ack[2] = (unsigned char)current_state;
+    ack[3] = ack[0] ^ ack[1] ^ ack[2];
+
+    for (int i = 0; i < 4; i++) {
+        unsigned char ch = ack[i];
+        for (int b = 7; b >= 0; b--) {
+            int bit = (ch >> b) & 1;
+            gpiod_set_value(data_out, bit);
+            udelay(10);
+            gpiod_set_value(clk_out, 1);
+            udelay(100);
+            gpiod_set_value(clk_out, 0);
         }
     }
+    DBG("ACK sent: %02X %02X %02X %02X", ack[0], ack[1], ack[2], ack[3]);
 }
 
-// FSM 업데이트 & 사용자 이벤트 큐잉
-static void update_fsm_and_notify(const unsigned char *cmd)
-{
-    if (cmd[1] == 0x01) { // ACCEL
-        current_speed += cmd[2];
-        if (current_speed > 100) {
-            current_speed = 100;
-            speed_state   = 2; // LIMITED
-        } else {
-            speed_state = 1;   // ACCEL
-        }
-    }
-
-    // 이벤트 버퍼에 저장
-    event_buf[0] = (unsigned char)current_speed;
-    event_buf[1] = (unsigned char)speed_state;
-    event_pending = true;
-    wake_up_interruptible(&rx_wq);
-    if (rx_async)
-        kill_fasync(&rx_async, SIGIO, POLL_IN);
-}
-
-// 타이머 콜백: 무입력 시 감속
-static void decel_timer_cb(struct timer_list *t)
-{
-    if (current_speed <= 0)
+static void handle_frame(unsigned char *frame) {
+    if ((frame[0] ^ frame[1] ^ frame[2]) != frame[3]) {
+        DBG("Checksum error");
         return;
+    }
 
-    current_speed = max(0, current_speed - DECEL_STEP);
-    if (current_speed == 0)
-        speed_state = 0; // IDLE
+    int cmd = frame[1];
+    int value = frame[2];
+    last_recv_time = jiffies;
 
-    send_ack_frame();
+    switch (cmd) {
+        case 0x01: // ACCEL
+            current_speed += value;
+            current_state = (current_speed > 100) ? LIMITED : ACCEL;
+            break;
+        default:
+            DBG("Unknown CMD: %02X", cmd);
+            break;
+    }
 
-    // 사용자 이벤트
-    event_buf[0] = (unsigned char)current_speed;
-    event_buf[1] = (unsigned char)speed_state;
-    event_pending = true;
-    wake_up_interruptible(&rx_wq);
-    if (rx_async)
-        kill_fasync(&rx_async, SIGIO, POLL_IN);
-
-    if (current_speed > 0)
-        mod_timer(&decel_timer,
-                  jiffies + msecs_to_jiffies(TIMEOUT_MS));
+    DBG("FSM updated: speed=%d, state=%d", current_speed, current_state);
+    send_ack();
 }
 
-// CLK 상승 엣지마다 비트 수신
-static irqreturn_t rx_clk_irq(int irq, void *dev)
-{
-    int bit = gpiod_get_value(g_rx_data) & 1;
-    rx_buf[byte_cnt] = (rx_buf[byte_cnt] << 1) | bit;
-    bit_cnt++;
-    if (bit_cnt == 8) {
-        bit_cnt = 0;
-        byte_cnt++;
-        if (byte_cnt == FRAME_LEN) {
-            if (rx_buf[3] == checksum(rx_buf, 3)) {
-                // FSM 업데이트 + ACK + notify
-                update_fsm_and_notify(rx_buf);
-                send_ack_frame();
-                mod_timer(&decel_timer,
-                          jiffies + msecs_to_jiffies(TIMEOUT_MS));
-            }
-            byte_cnt = 0;
-        }
+static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id) {
+    if (!rx_active) return IRQ_HANDLED;
+
+    DBG("CLK IRQ: triggered");
+
+    int bit = gpiod_get_value(data_in);
+    int byte_idx = bit_pos / 8;
+    rx_buf[byte_idx] <<= 1;
+    rx_buf[byte_idx] |= (bit & 1);
+    bit_pos++;
+
+    if (bit_pos == 32) {
+        DBG("CMD received: %02X %02X %02X %02X", rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
+        handle_frame(rx_buf);
+        bit_pos = 0;
     }
     return IRQ_HANDLED;
 }
 
-// file_operations: read, fasync
-static ssize_t rx_read(struct file *filp, char __user *buf,
-                       size_t cnt, loff_t *off)
-{
-    if (cnt < 2)
-        return -EINVAL;
+static void decay_function(struct work_struct *work) {
+    if (!rx_active) return;
 
-    // 이벤트 올 때까지 대기
-    if (wait_event_interruptible(rx_wq, event_pending))
-        return -ERESTARTSYS;
-
-    // 사용자에게 전송
-    if (copy_to_user(buf, event_buf, 2))
-        return -EFAULT;
-
-    event_pending = false;
-    return 2;
+    if (time_after(jiffies, last_recv_time + 2 * HZ)) {
+        if (current_speed > 0) {
+            current_speed -= 10;
+            current_state = (current_speed == 0) ? IDLE : DECEL;
+            DBG("Speed decayed: %d, state=%d", current_speed, current_state);
+            send_ack();
+        }
+    }
+    schedule_delayed_work(&decay_work, HZ);
 }
 
-static int rx_fasync(int fd, struct file *filp, int mode)
-{
-    return fasync_helper(fd, filp, mode, &rx_async);
+static ssize_t rx_read(struct file *filp, char __user *buf, size_t len, loff_t *off) {
+    char msg[64];
+    int n = snprintf(msg, sizeof(msg), "Speed: %d, State: %d\n", current_speed, current_state);
+    return simple_read_from_buffer(buf, len, off, msg, n);
 }
 
-static const struct file_operations rx_fops = {
-    .owner   = THIS_MODULE,
-    .read    = rx_read,
-    .fasync  = rx_fasync,
+static int rx_open(struct inode *inode, struct file *filp) {
+    rx_active = 1;
+    DBG("RX opened, FSM activated");
+    return 0;
+}
+
+static int rx_release(struct inode *inode, struct file *filp) {
+    rx_active = 0;
+    DBG("RX released, FSM deactivated");
+    return 0;
+}
+
+static struct file_operations rx_fops = {
+    .owner = THIS_MODULE,
+    .open = rx_open,
+    .release = rx_release,
+    .read = rx_read,
 };
 
-static int __init rx_drv_init(void)
-{
+static int __init rx_init(void) {
     int ret;
+    ret = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
+    if (ret < 0) return ret;
+    major = MAJOR(dev_num);
 
-    // GPIO consumer API
-    g_rx_data = gpiod_get_index(NULL, "gpio", RX_CMD_DATA_PIN, GPIOD_IN);
-    g_rx_clk  = gpiod_get_index(NULL, "gpio", RX_CMD_CLK_PIN,  GPIOD_IN);
-    g_ack_data= gpiod_get_index(NULL, "gpio", RX_ACK_DATA_PIN, GPIOD_OUT_LOW);
-    g_ack_clk = gpiod_get_index(NULL, "gpio", RX_ACK_CLK_PIN,  GPIOD_OUT_LOW);
-    if (IS_ERR(g_rx_data) || IS_ERR(g_rx_clk) ||
-        IS_ERR(g_ack_data)|| IS_ERR(g_ack_clk)) {
-        pr_err("rx_drv: GPIO get failed\n");
-        return -ENODEV;
-    }
-
-    // IRQ 등록
-    rx_irq = gpiod_to_irq(g_rx_clk);
-    ret = request_irq(rx_irq, rx_clk_irq,
-                      IRQF_TRIGGER_RISING, "rx_cmd_clk", NULL);
-    if (ret) {
-        pr_err("rx_drv: IRQ request failed\n");
-        goto err_put;
-    }
-
-    // 타이머 초기화
-    timer_setup(&decel_timer, decel_timer_cb, 0);
-
-    // /dev/speed_rx
-    ret = alloc_chrdev_region(&rx_devt, 0, 1, DEV_NAME_RX);
-    if (ret) goto err_irq;
     cdev_init(&rx_cdev, &rx_fops);
-    ret = cdev_add(&rx_cdev, rx_devt, 1);
-    if (ret) goto err_chrdev;
-    rx_class = class_create(THIS_MODULE, DEV_NAME_RX);
-    device_create(rx_class, NULL, rx_devt, NULL, DEV_NAME_RX);
-    init_waitqueue_head(&rx_wq);
+    rx_cdev.owner = THIS_MODULE;
+    ret = cdev_add(&rx_cdev, dev_num, 1);
+    if (ret) return ret;
 
-    pr_info("rx_drv loaded, /dev/%s ready\n", DEV_NAME_RX);
+    rx_class = class_create(CLASS_NAME);
+    device_create(rx_class, NULL, dev_num, NULL, DEVICE_NAME);
+
+    data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_IN);
+    clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_IN);
+    data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_OUT);
+    clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_OUT);
+
+    gpiod_direction_input(data_in);
+    gpiod_direction_input(clk_in);
+    gpiod_direction_output(data_out, 0);
+    gpiod_direction_output(clk_out, 0);
+
+    irq_clk_tx = gpiod_to_irq(clk_in);
+    ret = request_irq(irq_clk_tx, clk_tx_irq_handler, IRQF_TRIGGER_RISING, "clk_tx_irq", NULL);
+    if (ret) {
+        pr_err("[RX_DRV][ERROR] IRQ request failed: %d\n", ret);
+        return ret;
+    }
+
+    INIT_DELAYED_WORK(&decay_work, decay_function);
+    schedule_delayed_work(&decay_work, HZ);
+    last_recv_time = jiffies;
+
+    DBG("RX driver initialized");
     return 0;
-
-err_chrdev:
-    unregister_chrdev_region(rx_devt, 1);
-err_irq:
-    free_irq(rx_irq, NULL);
-err_put:
-    gpiod_put(g_ack_clk);
-    gpiod_put(g_ack_data);
-    gpiod_put(g_rx_clk);
-    gpiod_put(g_rx_data);
-    return ret;
 }
 
-static void __exit rx_drv_exit(void)
-{
-    device_destroy(rx_class, rx_devt);
+static void __exit rx_exit(void) {
+    cancel_delayed_work_sync(&decay_work);
+    free_irq(irq_clk_tx, NULL);
+    device_destroy(rx_class, dev_num);
     class_destroy(rx_class);
     cdev_del(&rx_cdev);
-    unregister_chrdev_region(rx_devt, 1);
-    del_timer_sync(&decel_timer);
-    free_irq(rx_irq, NULL);
-    gpiod_put(g_ack_clk);
-    gpiod_put(g_ack_data);
-    gpiod_put(g_rx_clk);
-    gpiod_put(g_rx_data);
-    pr_info("rx_drv unloaded\n");
+    unregister_chrdev_region(dev_num, 1);
+    DBG("RX driver exited");
 }
 
-module_init(rx_drv_init);
-module_exit(rx_drv_exit);
-
+module_init(rx_init);
+module_exit(rx_exit);
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("You");
-MODULE_DESCRIPTION("ECU RX driver + event chardev (/dev/speed_rx)");
