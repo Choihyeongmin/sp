@@ -51,7 +51,6 @@ static struct delayed_work decay_work;
 
 static void send_ack(void) {
     unsigned char ack[4];
-    msleep(10); // RX가 준비될 시간 확보
 
     ack[0] = 0x55;
     ack[1] = (unsigned char)current_speed;
