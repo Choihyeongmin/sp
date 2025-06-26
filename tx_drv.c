@@ -10,7 +10,8 @@
 #include <linux/interrupt.h>
 #include <linux/signal.h>
 #include <linux/poll.h>
-#include <linux/delay.h> 
+#include <linux/delay.h>   // for udelay
+#include <linux/workqueue.h>
 
 #define DEVICE_NAME "speed_ctrl_tx"
 #define CLASS_NAME  "sysprog_tx"
@@ -19,6 +20,7 @@
 #define BCM_CLK_TX_OUT  27
 #define BCM_DATA_RX_IN  6
 #define BCM_CLK_RX_IN   19
+#define BCM_BUTTON      20
 
 #define GPIOCHIP_BASE 512
 
@@ -32,6 +34,7 @@
 static struct class *tx_class;
 static struct gpio_desc *data_out, *clk_out;
 static struct gpio_desc *data_in, *clk_in;
+static struct gpio_desc *btn_in;
 static int major;
 static dev_t dev_num;
 static struct cdev tx_cdev;
@@ -39,6 +42,10 @@ static struct cdev tx_cdev;
 // ACK 수신용 인터럽트
 static int irq_clk_rx = -1;
 static struct fasync_struct *async_queue;
+
+// 버튼 상태 확인용
+static struct delayed_work button_poll_work;
+static int last_btn = 0;
 
 // 수신 버퍼
 #define FRAME_SIZE 4
@@ -61,16 +68,8 @@ static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
     return IRQ_HANDLED;
 }
 
-static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) {
-    unsigned char frame[FRAME_SIZE];
-    if (len != FRAME_SIZE)
-        return -EINVAL;
-
-    if (copy_from_user(frame, buf, FRAME_SIZE))
-        return -EFAULT;
-
+static void send_frame(unsigned char *frame) {
     DBG("TX sending frame: %02X %02X %02X %02X", frame[0], frame[1], frame[2], frame[3]);
-
     for (int i = 0; i < FRAME_SIZE; i++) {
         unsigned char ch = frame[i];
         for (int b = 7; b >= 0; b--) {
@@ -82,7 +81,17 @@ static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, l
             gpiod_set_value(clk_out, 0);
         }
     }
-    return FRAME_SIZE;
+}
+
+static void button_poll(struct work_struct *work) {
+    int val = gpiod_get_value(btn_in);
+    if (val == 1 && last_btn == 0) { // rising edge
+        unsigned char frame[4] = {0xAA, 0x01, 10, 0};
+        frame[3] = frame[0] ^ frame[1] ^ frame[2];
+        send_frame(frame);
+    }
+    last_btn = val;
+    schedule_delayed_work(&button_poll_work, msecs_to_jiffies(100));
 }
 
 static ssize_t tx_read(struct file *filp, char __user *buf, size_t len, loff_t *off) {
@@ -107,7 +116,6 @@ static int tx_fasync(int fd, struct file *filp, int mode) {
 
 static struct file_operations tx_fops = {
     .owner = THIS_MODULE,
-    .write = tx_write,
     .read = tx_read,
     .open = tx_open,
     .release = tx_release,
@@ -133,20 +141,26 @@ static int __init tx_init(void) {
     clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_OUT);
     data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_IN);
     clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_IN);
+    btn_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_BUTTON);
 
     gpiod_direction_output(data_out, 0);
     gpiod_direction_output(clk_out, 0);
     gpiod_direction_input(data_in);
     gpiod_direction_input(clk_in);
+    gpiod_direction_input(btn_in);
 
     irq_clk_rx = gpiod_to_irq(clk_in);
     request_irq(irq_clk_rx, clk_rx_irq_handler, IRQF_TRIGGER_RISING, "clk_rx_irq", NULL);
+
+    INIT_DELAYED_WORK(&button_poll_work, button_poll);
+    schedule_delayed_work(&button_poll_work, msecs_to_jiffies(100));
 
     DBG("TX driver initialized");
     return 0;
 }
 
 static void __exit tx_exit(void) {
+    cancel_delayed_work_sync(&button_poll_work);
     free_irq(irq_clk_rx, NULL);
     device_destroy(tx_class, dev_num);
     class_destroy(tx_class);
