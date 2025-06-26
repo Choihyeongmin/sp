@@ -62,11 +62,11 @@ static void send_ack(void) {
         for (int b = 7; b >= 0; b--) {
             int bit = (ch >> b) & 1;
             gpiod_set_value(data_out, bit);
-            msleep(1);   // → 느리지만 확실히 handler 작동 확인 가능
+            udelay(10);             // 데이터 세팅 안정화
             gpiod_set_value(clk_out, 1);
-            msleep(1);
+            udelay(200);            // 클럭 HIGH 유지 시간
             gpiod_set_value(clk_out, 0);
-            msleep(1);
+            udelay(10);             // 클럭 LOW 유지 시간
             DBG("asdfkjasdklfj CLK IRQ: asdf");
 
         }
