@@ -8,7 +8,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
-#include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <linux/delay.h>
 
@@ -195,6 +194,7 @@ static const struct file_operations rx_fops = {
     .open    = rx_open,
     .release = rx_release,
     .read    = rx_read,
+    .llseek  = noop_llseek,
 };
 
 static int __init rx_init(void)
