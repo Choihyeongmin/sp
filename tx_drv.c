@@ -18,7 +18,7 @@
 #define BCM_DATA_TX_OUT 4
 #define BCM_CLK_TX_OUT  27
 #define BCM_DATA_RX_IN  6
-#define BCM_CLK_RX_IN   19
+#define BCM_CLK_RX_IN   20
 
 #define GPIOCHIP_BASE 512
 
