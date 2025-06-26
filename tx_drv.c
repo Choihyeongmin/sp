@@ -1,4 +1,4 @@
-/* tx_drv.c - TX 측 드라이버 */
+/* tx_drv.c - TX 측 드라이버 with 버튼 디버깅 및 active-low 대응 */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -10,7 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/signal.h>
 #include <linux/poll.h>
-#include <linux/delay.h>   // for udelay
+#include <linux/delay.h>
 #include <linux/workqueue.h>
 
 #define DEVICE_NAME "speed_ctrl_tx"
@@ -39,15 +39,12 @@ static int major;
 static dev_t dev_num;
 static struct cdev tx_cdev;
 
-// ACK 수신용 인터럽트
 static int irq_clk_rx = -1;
 static struct fasync_struct *async_queue;
 
-// 버튼 상태 확인용
 static struct delayed_work button_poll_work;
 static int last_btn = 0;
 
-// 수신 버퍼
 #define FRAME_SIZE 4
 static unsigned char rx_frame[FRAME_SIZE];
 static int bit_pos = 0;
@@ -84,12 +81,17 @@ static void send_frame(unsigned char *frame) {
 }
 
 static void button_poll(struct work_struct *work) {
-    int val = gpiod_get_value(btn_in);
-    if (val == 1 && last_btn == 0) { // rising edge
+    int raw_val = gpiod_get_value(btn_in);
+    int val = !raw_val;  // active-low 버튼 대응: 눌림 시 1로 처리
+    DBG("Button read (raw): %d -> interpreted: %d (last: %d)", raw_val, val, last_btn);
+
+    if (val == 1 && last_btn == 0) {
+        DBG("Button rising edge detected, sending frame...");
         unsigned char frame[4] = {0xAA, 0x01, 10, 0};
         frame[3] = frame[0] ^ frame[1] ^ frame[2];
         send_frame(frame);
     }
+
     last_btn = val;
     schedule_delayed_work(&button_poll_work, msecs_to_jiffies(100));
 }
