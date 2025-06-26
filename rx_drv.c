@@ -22,6 +22,7 @@
 #define GPIOCHIP_BASE 512
 #define FRAME_SIZE    4
 
+#define DEBUG
 #ifdef DEBUG
 # define DBG(fmt, ...) printk(KERN_INFO "[RX_DRV][DEBUG] " fmt "\n", ##__VA_ARGS__)
 #else
