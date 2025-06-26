@@ -63,9 +63,11 @@ static void send_ack(void) {
             gpiod_set_value(data_out, bit);
             udelay(20);
             gpiod_set_value(clk_out, 1);
-            udelay(300);
+            udelay(200);
             gpiod_set_value(clk_out, 0);
             udelay(20);
+            DBG("asdfkjasdklfj CLK IRQ: asdf");
+
         }
     }
     DBG("ACK sent: %02X %02X %02X %02X", ack[0], ack[1], ack[2], ack[3]);
