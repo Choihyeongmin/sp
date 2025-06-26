@@ -51,6 +51,7 @@ static struct delayed_work decay_work;
 
 static void send_ack(void) {
     unsigned char ack[4];
+    msleep(10); // RX가 준비될 시간 확보
 
     ack[0] = 0x55;
     ack[1] = (unsigned char)current_speed;
@@ -93,9 +94,8 @@ static void handle_frame(unsigned char *frame) {
             DBG("Unknown CMD: %02X", cmd);
             break;
     }
-    msleep(1); // send_ack() 전에 삽입
-
     DBG("FSM updated: speed=%d, state=%d", current_speed, current_state);
+
     send_ack();
 }
 
