@@ -1,4 +1,4 @@
-/* tx_drv.c - TX 측 드라이버 (버튼 제거, write()로 프레임 전송 + ACK 수신) */
+/* tx_drv.c - TX 측 드라이버 (버튼 제거, ACK 수신만) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -44,11 +44,20 @@ static unsigned char rx_frame[FRAME_SIZE];
 static int bit_pos = 0;
 
 static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
+    if (bit_pos == 0)
+        memset(rx_frame, 0, sizeof(rx_frame));
+
     int bit = gpiod_get_value(data_in);
     int byte_idx = bit_pos / 8;
     rx_frame[byte_idx] <<= 1;
     rx_frame[byte_idx] |= (bit & 0x1);
     bit_pos++;
+
+    if (bit_pos > FRAME_SIZE * 8) {
+        DBG("Bit overflow — resetting");
+        bit_pos = 0;
+        return IRQ_HANDLED;
+    }
 
     if (bit_pos == 32) {
         DBG("ACK received: %02X %02X %02X %02X", rx_frame[0], rx_frame[1], rx_frame[2], rx_frame[3]);
@@ -84,10 +93,8 @@ static ssize_t tx_read(struct file *filp, char __user *buf, size_t len, loff_t *
 
 static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) {
     unsigned char frame[FRAME_SIZE];
-
     if (len < FRAME_SIZE)
         return -EINVAL;
-
     if (copy_from_user(frame, buf, FRAME_SIZE))
         return -EFAULT;
 
