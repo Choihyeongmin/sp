@@ -1,4 +1,4 @@
-/* tx_drv.c - TX 측 드라이버 (ACK 수신 전용, SIGIO 제거) */
+/* tx_drv.c - TX 측 드라이버 (ACK 수신 전용, 간결화) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -30,10 +30,11 @@ static struct cdev tx_cdev;
 static struct class *tx_class;
 
 static struct gpio_desc *data_out, *clk_out;
-static struct gpio_desc *data_in,  *clk_in;
+static struct gpio_desc *data_in, *clk_in;
 
 static unsigned char rx_frame[FRAME_SIZE];
-static int bit_pos;
+static int irq_clk_rx;
+static int bit_pos = 0;
 
 /* IRQ 핸들러: ACK 비트 수신 */
 static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id)
