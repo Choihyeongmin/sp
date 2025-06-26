@@ -1,33 +1,44 @@
-/* rx_app.c - RX 상태 모니터링 애플리케이션 */
+// rx_app.c
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <string.h>
+#include <signal.h>
 #include <stdlib.h>
-#include <sys/ioctl.h>
 
-#define DEV_PATH "/dev/speed_ctrl_rx"
+#define DEV_RX   "/dev/speed_rx"
 
-int main() {
-    printf("[RX_APP] RX 모니터링 시작\n");
+volatile sig_atomic_t stop = 0;
+void sighandler(int sig){ stop = 1; }
 
-    int fd = open(DEV_PATH, O_RDONLY);
+int main(void) {
+    int fd;
+    unsigned char buf[2];
+
+    signal(SIGINT,  sighandler);
+    signal(SIGTERM, sighandler);
+
+    fd = open(DEV_RX, O_RDONLY);
     if (fd < 0) {
-        perror("open /dev/speed_ctrl_rx");
+        perror("open " DEV_RX);
         return 1;
     }
 
-    printf("[RX_APP] 드라이버가 활성화되었습니다. FSM 및 감속 로직이 작동합니다.\n");
-    printf("[RX_APP] 상태를 1초마다 확인합니다.\n\n");
-
-    while (1) {
-        char buf[128] = {0};
-        lseek(fd, 0, SEEK_SET);
-        read(fd, buf, sizeof(buf));
-        printf("[RX_APP] %s", buf);
-        sleep(1);
+    printf("[RX_APP] listening on %s (Ctrl+C to quit)\n", DEV_RX);
+    while (!stop) {
+        int n = read(fd, buf, 2);
+        if (n < 0) {
+            if (stop) break;
+            perror("read");
+            break;
+        } else if (n == 2) {
+            printf("[RX_APP] speed=%3u km/h, state=%s\n",
+                   buf[0],
+                   buf[1]==1 ? "ACCEL" :
+                   buf[1]==2 ? "LIMITED" : "IDLE");
+        }
     }
 
     close(fd);
+    printf("[RX_APP] exiting\n");
     return 0;
 }

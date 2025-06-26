@@ -1,166 +1,192 @@
-/* tx_drv.c - TX 측 드라이버 (버튼 제거, write()로 프레임 전송 + ACK 수신) */
+// tx_drv.c
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/fs.h>
-#include <linux/uaccess.h>
-#include <linux/cdev.h>
-#include <linux/device.h>
+#include <linux/kernel.h>
 #include <linux/gpio/consumer.h>
-#include <linux/gpio.h>
 #include <linux/interrupt.h>
-#include <linux/signal.h>
-#include <linux/poll.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/uaccess.h>
+#include <linux/fasync.h>
+#include <linux/wait.h>
 #include <linux/delay.h>
 
-#define DEVICE_NAME "speed_ctrl_tx"
-#define CLASS_NAME  "sysprog_tx"
+#define DEV_NAME          "speed_ctrl"
+#define START_BYTE_CMD    0xA5
+#define FRAME_LEN         4
 
-#define BCM_DATA_TX_OUT 4
-#define BCM_CLK_TX_OUT  27
-#define BCM_DATA_RX_IN  6
-#define BCM_CLK_RX_IN   19
+// 하드코딩된 BCM 핀 번호
+#define TX_CMD_DATA_PIN    4   // TX → RX 데이터
+#define TX_CMD_CLK_PIN    27   // TX → RX 클럭
+#define TX_ACK_DATA_PIN    6   // RX → TX 데이터
+#define TX_ACK_CLK_PIN    19  // RX → TX 클럭
 
-#define GPIOCHIP_BASE 512
+static struct gpio_desc *g_tx_data, *g_tx_clk;
+static struct gpio_desc *g_ack_data, *g_ack_clk;
+static int               ack_irq;
 
-#define DEBUG
-#ifdef DEBUG
-#define DBG(fmt, ...) printk(KERN_INFO "[TX_DRV][DEBUG] " fmt "\n", ##__VA_ARGS__)
-#else
-#define DBG(fmt, ...)
-#endif
+static dev_t             tx_devt;
+static struct cdev       tx_cdev;
+static struct class     *tx_class;
 
-static struct class *tx_class;
-static struct gpio_desc *data_out, *clk_out;
-static struct gpio_desc *data_in, *clk_in;
-static int major;
-static dev_t dev_num;
-static struct cdev tx_cdev;
+static wait_queue_head_t tx_wq;
+static struct fasync_struct *tx_async;
+static unsigned char     ack_buf[FRAME_LEN];
+static int               ack_bit_cnt, ack_byte_cnt;
+static bool              ack_pending = false;
 
-static int irq_clk_rx = -1;
-static struct fasync_struct *async_queue;
-
-#define FRAME_SIZE 4
-static unsigned char rx_frame[FRAME_SIZE];
-static int bit_pos = 0;
-
-static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
-    int bit = gpiod_get_value(data_in);
-    int byte_idx = bit_pos / 8;
-    rx_frame[byte_idx] <<= 1;
-    rx_frame[byte_idx] |= (bit & 0x1);
-    bit_pos++;
-
-    if (bit_pos == 32) {
-        DBG("ACK received: %02X %02X %02X %02X", rx_frame[0], rx_frame[1], rx_frame[2], rx_frame[3]);
-        if (async_queue)
-            kill_fasync(&async_queue, SIGIO, POLL_IN);
-        bit_pos = 0;
-    }
-    return IRQ_HANDLED;
+// XOR checksum
+static unsigned char checksum(const unsigned char *b, int len)
+{
+    unsigned char cs = 0;
+    while (len--) cs ^= *b++;
+    return cs;
 }
 
-static void send_frame(unsigned char *frame) {
-    DBG("TX sending frame: %02X %02X %02X %02X", frame[0], frame[1], frame[2], frame[3]);
-    for (int i = 0; i < FRAME_SIZE; i++) {
-        unsigned char ch = frame[i];
-        for (int b = 7; b >= 0; b--) {
-            int bit = (ch >> b) & 1;
-            gpiod_set_value(data_out, bit);
-            udelay(10);
-            gpiod_set_value(clk_out, 1);
-            udelay(100);
-            gpiod_set_value(clk_out, 0);
+// 명령 프레임 비트뱅잉 송신
+static void send_cmd_frame(const unsigned char *frame)
+{
+    int i, j;
+    for (i = 0; i < FRAME_LEN; i++) {
+        for (j = 7; j >= 0; j--) {
+            gpiod_set_value(g_tx_data, (frame[i] >> j) & 1);
+            gpiod_set_value(g_tx_clk,  1);
+            udelay(1);
+            gpiod_set_value(g_tx_clk,  0);
+            udelay(1);
         }
     }
 }
 
-static ssize_t tx_read(struct file *filp, char __user *buf, size_t len, loff_t *off) {
-    if (len < FRAME_SIZE)
+// ACK 클럭 상승 엣지 IRQ 핸들러
+static irqreturn_t ack_clk_irq(int irq, void *dev)
+{
+    int bit = gpiod_get_value(g_ack_data) & 1;
+    ack_buf[ack_byte_cnt] = (ack_buf[ack_byte_cnt] << 1) | bit;
+    if (++ack_bit_cnt == 8) {
+        ack_bit_cnt = 0;
+        if (++ack_byte_cnt == FRAME_LEN) {
+            if (ack_buf[3] == checksum(ack_buf, 3)) {
+                ack_pending = true;
+                wake_up_interruptible(&tx_wq);
+                if (tx_async)
+                    kill_fasync(&tx_async, SIGIO, POLL_IN);
+            }
+            ack_byte_cnt = 0;
+        }
+    }
+    return IRQ_HANDLED;
+}
+
+static ssize_t tx_write(struct file *filp,
+                        const char __user *buf,
+                        size_t len, loff_t *off)
+{
+    unsigned char frame[FRAME_LEN];
+    if (len != FRAME_LEN) return -EINVAL;
+    if (copy_from_user(frame, buf, FRAME_LEN)) return -EFAULT;
+    if (frame[0] != START_BYTE_CMD ||
+        frame[3] != checksum(frame, 3))
         return -EINVAL;
-    if (copy_to_user(buf, rx_frame, FRAME_SIZE))
+    send_cmd_frame(frame);
+    return FRAME_LEN;
+}
+
+static ssize_t tx_read(struct file *filp,
+                       char __user *buf,
+                       size_t len, loff_t *off)
+{
+    if (wait_event_interruptible(tx_wq, ack_pending))
+        return -ERESTARTSYS;
+    if (copy_to_user(buf, ack_buf, FRAME_LEN))
         return -EFAULT;
-    return FRAME_SIZE;
+    ack_pending = false;
+    return FRAME_LEN;
 }
 
-static ssize_t tx_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) {
-    unsigned char frame[FRAME_SIZE];
-
-    if (len < FRAME_SIZE)
-        return -EINVAL;
-
-    if (copy_from_user(frame, buf, FRAME_SIZE))
-        return -EFAULT;
-
-    send_frame(frame);
-    return FRAME_SIZE;
+static int tx_fasync(int fd, struct file *filp, int mode)
+{
+    return fasync_helper(fd, filp, mode, &tx_async);
 }
 
-static int tx_open(struct inode *inode, struct file *filp) {
-    return 0;
-}
-
-static int tx_release(struct inode *inode, struct file *filp) {
-    return 0;
-}
-
-static int tx_fasync(int fd, struct file *filp, int mode) {
-    return fasync_helper(fd, filp, mode, &async_queue);
-}
-
-static struct file_operations tx_fops = {
-    .owner = THIS_MODULE,
-    .read = tx_read,
-    .write = tx_write,
-    .open = tx_open,
-    .release = tx_release,
-    .fasync = tx_fasync,
+static const struct file_operations tx_fops = {
+    .owner   = THIS_MODULE,
+    .write   = tx_write,
+    .read    = tx_read,
+    .fasync  = tx_fasync,
 };
 
-static int __init tx_init(void) {
+static int __init tx_drv_init(void)
+{
     int ret;
 
-    ret = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
-    if (ret < 0) return ret;
-    major = MAJOR(dev_num);
-
-    cdev_init(&tx_cdev, &tx_fops);
-    tx_cdev.owner = THIS_MODULE;
-    ret = cdev_add(&tx_cdev, dev_num, 1);
-    if (ret) return ret;
-
-    tx_class = class_create(CLASS_NAME);
-    device_create(tx_class, NULL, dev_num, NULL, DEVICE_NAME);
-
-    data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_OUT);
-    clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_OUT);
-    data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_IN);
-    clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_IN);
-
-    gpiod_direction_output(data_out, 0);
-    gpiod_direction_output(clk_out, 0);
-    gpiod_direction_input(data_in);
-    gpiod_direction_input(clk_in);
-
-    irq_clk_rx = gpiod_to_irq(clk_in);
-    ret = request_irq(irq_clk_rx, clk_rx_irq_handler, IRQF_TRIGGER_RISING, "clk_rx_irq", NULL);
-    if (ret) {
-        pr_err("[TX_DRV][ERROR] IRQ request failed: %d\n", ret);
-        return ret;
+    // GPIO consumer API로 획득
+    g_tx_data = gpiod_get_index(NULL, "gpio", TX_CMD_DATA_PIN, GPIOD_OUT_LOW);
+    g_tx_clk  = gpiod_get_index(NULL, "gpio", TX_CMD_CLK_PIN,  GPIOD_OUT_LOW);
+    g_ack_data= gpiod_get_index(NULL, "gpio", TX_ACK_DATA_PIN, GPIOD_IN);
+    g_ack_clk = gpiod_get_index(NULL, "gpio", TX_ACK_CLK_PIN,  GPIOD_IN);
+    if (IS_ERR(g_tx_data)||IS_ERR(g_tx_clk)||
+        IS_ERR(g_ack_data)||IS_ERR(g_ack_clk)) {
+        pr_err("tx_drv: GPIO get failed\n");
+        return -ENODEV;
     }
 
-    DBG("TX driver initialized");
+    // IRQ 등록
+    ack_irq = gpiod_to_irq(g_ack_clk);
+    ret = request_irq(ack_irq, ack_clk_irq,
+                      IRQF_TRIGGER_RISING, "tx_ack_clk", NULL);
+    if (ret) {
+        pr_err("tx_drv: request_irq failed\n");
+        goto err_gpio;
+    }
+
+    init_waitqueue_head(&tx_wq);
+
+    // char device 등록
+    ret = alloc_chrdev_region(&tx_devt, 0, 1, DEV_NAME);
+    if (ret) goto err_irq;
+    cdev_init(&tx_cdev, &tx_fops);
+    tx_cdev.owner = THIS_MODULE;
+    ret = cdev_add(&tx_cdev, tx_devt, 1);
+    if (ret) goto err_chrdev;
+    tx_class = class_create(THIS_MODULE, DEV_NAME);
+    device_create(tx_class, NULL, tx_devt, NULL, DEV_NAME);
+
+    pr_info("tx_drv loaded (BCM %d,%d→%d,%d), major=%d\n",
+        TX_CMD_DATA_PIN, TX_CMD_CLK_PIN,
+        TX_ACK_DATA_PIN, TX_ACK_CLK_PIN,
+        MAJOR(tx_devt));
     return 0;
+
+err_chrdev:
+    unregister_chrdev_region(tx_devt,1);
+err_irq:
+    free_irq(ack_irq, NULL);
+err_gpio:
+    gpiod_put(g_ack_clk);
+    gpiod_put(g_ack_data);
+    gpiod_put(g_tx_clk);
+    gpiod_put(g_tx_data);
+    return ret;
 }
 
-static void __exit tx_exit(void) {
-    free_irq(irq_clk_rx, NULL);
-    device_destroy(tx_class, dev_num);
+static void __exit tx_drv_exit(void)
+{
+    device_destroy(tx_class, tx_devt);
     class_destroy(tx_class);
     cdev_del(&tx_cdev);
-    unregister_chrdev_region(dev_num, 1);
-    DBG("TX driver exited");
+    unregister_chrdev_region(tx_devt,1);
+    free_irq(ack_irq, NULL);
+    gpiod_put(g_ack_clk);
+    gpiod_put(g_ack_data);
+    gpiod_put(g_tx_clk);
+    gpiod_put(g_tx_data);
+    pr_info("tx_drv unloaded\n");
 }
 
-module_init(tx_init);
-module_exit(tx_exit);
+module_init(tx_drv_init);
+module_exit(tx_drv_exit);
+
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("You");
+MODULE_DESCRIPTION("ECU TX driver using gpio/consumer.h");

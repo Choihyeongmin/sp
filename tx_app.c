@@ -1,56 +1,59 @@
-/* tx_app.c - TX 앱 (버튼 없이 엔터키로 명령 전송) */
+// tx_app.c
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
-#include <string.h>
-#include <stdlib.h>
-#include <sys/ioctl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <errno.h>
 
-#define DEV_PATH "/dev/speed_ctrl_tx"
-#define FRAME_SIZE 4
+#define DEV_PATH       "/dev/speed_ctrl"
+#define START_BYTE     0xA5
+#define CMD_ACCEL      0x01
+#define ACCEL_STEP     10
+#define FRAME_LEN      4
 
-static int fd_dev = -1;
+volatile sig_atomic_t got_ack = 0;
+void sigio_handler(int sig) { got_ack = 1; }
 
-void sigio_handler(int signo) {
-    unsigned char ack[FRAME_SIZE];
-    lseek(fd_dev, 0, SEEK_SET);
-    int n = read(fd_dev, ack, FRAME_SIZE);
-    if (n == FRAME_SIZE) {
-        printf("[TX_APP][RECV] ACK: speed=%d, state=0x%02X\n", ack[1], ack[2]);
-    } else {
-        perror("read");
-    }
+unsigned char checksum(const unsigned char *b, int len) {
+    unsigned char cs = 0;
+    for (int i = 0; i < len; i++) cs ^= b[i];
+    return cs;
+}
+
+void build_frame(unsigned char *f) {
+    f[0] = START_BYTE;
+    f[1] = CMD_ACCEL;
+    f[2] = ACCEL_STEP;
+    f[3] = checksum(f, 3);
 }
 
 int main() {
-    fd_dev = open(DEV_PATH, O_RDWR | O_NONBLOCK);
-    if (fd_dev < 0) {
-        perror("open device");
-        return 1;
-    }
+    int fd = open(DEV_PATH, O_RDWR);
+    if (fd < 0) { perror("open"); return 1; }
 
+    // SIGIO 설정
+    fcntl(fd, F_SETOWN, getpid());
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_ASYNC);
     signal(SIGIO, sigio_handler);
-    fcntl(fd_dev, F_SETOWN, getpid());
-    fcntl(fd_dev, F_SETFL, O_ASYNC | O_NONBLOCK);
 
-    printf("[TX_APP] Enter키 입력 시 명령을 전송합니다. (CTRL+C to quit)\n");
+    unsigned char frame[FRAME_LEN], ack[FRAME_LEN];
+    build_frame(frame);
+    printf("Enter → +%dkm/h ACCEL (Ctrl+C to exit)\n", ACCEL_STEP);
 
     while (1) {
-        printf("\n[TX_APP] 전송하려면 Enter를 누르세요 > ");
-        getchar();
-
-        unsigned char frame[FRAME_SIZE] = {0xAA, 0x01, 10, 0};
-        frame[3] = frame[0] ^ frame[1] ^ frame[2];
-        write(fd_dev, frame, FRAME_SIZE);
-
-        printf("[TX_APP][SEND] frame: %02X %02X %02X %02X\n",
-               frame[0], frame[1], frame[2], frame[3]);
+        if (getchar() == '\n') {
+            if (write(fd, frame, FRAME_LEN) != FRAME_LEN)
+                perror("write");
+        }
+        if (got_ack) {
+            got_ack = 0;
+            if (read(fd, ack, FRAME_LEN) == FRAME_LEN)
+                printf("[ACK] speed=%d, state=%s\n",
+                    ack[1],
+                    ack[2]==1 ? "ACCEL" :
+                    ack[2]==2 ? "LIMITED" : "IDLE");
+        }
     }
 
-    close(fd_dev);
+    close(fd);
     return 0;
 }
