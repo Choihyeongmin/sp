@@ -1,4 +1,4 @@
-/* tx_drv.c - TX 측 드라이버 with 버튼 디버깅 및 active-low 대응 */
+/* tx_drv.c - TX 측 드라이버 with 버튼 디버깅 (active-high 적용) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -81,9 +81,8 @@ static void send_frame(unsigned char *frame) {
 }
 
 static void button_poll(struct work_struct *work) {
-    int raw_val = gpiod_get_value(btn_in);
-    int val = !raw_val;  // active-low 버튼 대응: 눌림 시 1로 처리
-    DBG("Button read (raw): %d -> interpreted: %d (last: %d)", raw_val, val, last_btn);
+    int val = gpiod_get_value(btn_in);  // active-high 방식 적용
+    DBG("Button read: %d (last: %d)", val, last_btn);
 
     if (val == 1 && last_btn == 0) {
         DBG("Button rising edge detected, sending frame...");
