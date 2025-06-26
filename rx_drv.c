@@ -161,16 +161,6 @@ static void decay_function(struct work_struct *work)
     schedule_delayed_work(&decay_work, HZ);
 }
 
-static ssize_t rx_read(struct file *filp, char __user *buf,
-                       size_t len, loff_t *off)
-{
-    char msg[64];
-    int n = snprintf(msg, sizeof(msg),
-                     "Speed: %d, State: %d\n",
-                     current_speed, current_state);
-    return simple_read_from_buffer(buf, len, off, msg, n);
-}
-
 static int rx_open(struct inode *inode, struct file *filp)
 {
     rx_active = 1;
@@ -193,7 +183,6 @@ static const struct file_operations rx_fops = {
     .owner   = THIS_MODULE,
     .open    = rx_open,
     .release = rx_release,
-    .read    = rx_read,
 };
 
 static int __init rx_init(void)

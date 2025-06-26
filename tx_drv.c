@@ -49,7 +49,6 @@ static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
         DBG("bit_pos overflow, reset");
         return IRQ_HANDLED;
     }
-    DBG("Second CLK IRQ [%d]", bit_pos);
 
     int bit = gpiod_get_value(data_in);
     int byte_idx = bit_pos / 8;
@@ -105,6 +104,9 @@ static int tx_open(struct inode *inode, struct file *filp) {
     return 0;
 }
 
+static int tx_release(struct inode *inode, struct file *filp) {
+    return 0;
+}
 
 static int tx_fasync(int fd, struct file *filp, int mode) {
     return fasync_helper(fd, filp, mode, &async_queue);
@@ -115,6 +117,7 @@ static struct file_operations tx_fops = {
     .read = tx_read,
     .write = tx_write,
     .open = tx_open,
+    .release = tx_release,
     .fasync = tx_fasync,
 };
 

@@ -3,12 +3,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
-#include <string.h>
-#include <stdlib.h>
-#include <sys/ioctl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <errno.h>
 
 #define DEV_PATH "/dev/speed_ctrl_tx"
 #define FRAME_SIZE 4
