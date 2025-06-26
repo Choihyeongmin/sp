@@ -51,6 +51,8 @@ static struct delayed_work decay_work;
 
 static void send_ack(void) {
     unsigned char ack[4];
+    udelay(20); // 🟡 신호 안정화 대기: RX에서 클럭 LOW→HIGH 후 TX가 읽을 여유
+
     ack[0] = 0x55;
     ack[1] = (unsigned char)current_speed;
     ack[2] = (unsigned char)current_state;
