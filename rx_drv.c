@@ -187,7 +187,7 @@ static int __init rx_init(void)
     rx_cdev.owner = THIS_MODULE;
     ret = cdev_add(&rx_cdev, dev_num, 1);
     if (ret) return ret;
-    rx_class = class_create(THIS_MODULE, CLASS_NAME);
+    rx_class = class_create( CLASS_NAME);
     device_create(rx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
     /* GPIO setup */
