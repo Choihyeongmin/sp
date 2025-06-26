@@ -1,4 +1,4 @@
-/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 및 타이밍 보정 (deferred ACK via workqueue) */
+=/* rx_drv.c - RX 측 드라이버 with IRQ 디버깅 및 타이밍 보정 (deferred ACK via workqueue, open/close 기반 decay) */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -12,8 +12,8 @@
 #include <linux/jiffies.h>
 #include <linux/delay.h>
 
-#define DEVICE_NAME   "speed_ctrl_rx"
-#define CLASS_NAME    "sysprog_rx"
+#define DEVICE_NAME    "speed_ctrl_rx"
+#define CLASS_NAME     "sysprog_rx"
 
 #define BCM_DATA_TX_IN   17
 #define BCM_CLK_TX_IN    22
@@ -23,7 +23,6 @@
 #define GPIOCHIP_BASE 512
 #define FRAME_SIZE    4
 
-#define DEBUG
 #ifdef DEBUG
 # define DBG(fmt, ...) printk(KERN_INFO "[RX_DRV][DEBUG] " fmt "\n", ##__VA_ARGS__)
 #else
@@ -45,17 +44,18 @@ static int                        irq_clk_tx = -1;
 static unsigned char             rx_buf[FRAME_SIZE];
 static int                        bit_pos   = 0;
 static unsigned long             last_recv_time;
-static struct delayed_work       decay_work;
 
-/* deferred ACK */
+/* deferred ACK via workqueue */
 static struct work_struct ack_work;
 static unsigned char      ack_buf[FRAME_SIZE];
 
-/* workqueue handler: runs in process context */
+/* decay delayed work */
+static struct delayed_work decay_work;
+
+/* workqueue handler: runs in process context, safe to sleep */
 static void ack_work_fn(struct work_struct *work)
 {
-    /* small delay to let TX side get ready */
-    msleep(10);
+    msleep(10);  // TX 준비 대기
 
     for (int i = 0; i < FRAME_SIZE; i++) {
         unsigned char ch = ack_buf[i];
@@ -73,7 +73,7 @@ static void ack_work_fn(struct work_struct *work)
         ack_buf[0], ack_buf[1], ack_buf[2], ack_buf[3]);
 }
 
-/* frame 처리만 담당, ACK 전송은 IRQ 핸들러에서 스케줄 */
+/* frame 처리만, ACK 스케줄은 IRQ 핸들러에서 */
 static bool handle_frame(unsigned char *frame)
 {
     if ((frame[0] ^ frame[1] ^ frame[2]) != frame[3]) {
@@ -82,10 +82,15 @@ static bool handle_frame(unsigned char *frame)
     }
 
     last_recv_time = jiffies;
+
     switch (frame[1]) {
     case 0x01: /* ACCEL */
-        current_speed += frame[2];
-        current_state = (current_speed > 100 ? LIMITED : ACCEL);
+        if (current_speed < 100) {
+            current_speed += frame[2];
+            if (current_speed > 100)
+                current_speed = 100;
+        }
+        current_state = (current_speed == 100 ? LIMITED : ACCEL);
         break;
     default:
         DBG("Unknown CMD: %02X", frame[1]);
@@ -112,7 +117,6 @@ static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id)
         DBG("CMD received: %02X %02X %02X %02X",
             rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
         if (handle_frame(rx_buf)) {
-            /* prepare ACK frame and schedule deferred send */
             ack_buf[0] = 0x55;
             ack_buf[1] = (unsigned char)current_speed;
             ack_buf[2] = (unsigned char)current_state;
@@ -124,24 +128,30 @@ static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id)
     return IRQ_HANDLED;
 }
 
+/* decay: open 상태에서만 동작, 속도 감소 후 ACK (IDLE 제외) */
 static void decay_function(struct work_struct *work)
 {
     if (!rx_active)
-        return;
+        return;  // release 시 빠져나가 다음 스케줄 중지
 
     if (time_after(jiffies, last_recv_time + 2 * HZ) && current_speed > 0) {
         current_speed -= 10;
+        if (current_speed < 0)
+            current_speed = 0;
         current_state = (current_speed == 0 ? IDLE : DECEL);
         DBG("Speed decayed: %d, state=%d",
             current_speed, current_state);
 
-        /* schedule deferred ACK for decay event */
-        ack_buf[0] = 0x55;
-        ack_buf[1] = (unsigned char)current_speed;
-        ack_buf[2] = (unsigned char)current_state;
-        ack_buf[3] = ack_buf[0] ^ ack_buf[1] ^ ack_buf[2];
-        schedule_work(&ack_work);
+        if (current_state != IDLE) {
+            ack_buf[0] = 0x55;
+            ack_buf[1] = (unsigned char)current_speed;
+            ack_buf[2] = (unsigned char)current_state;
+            ack_buf[3] = ack_buf[0] ^ ack_buf[1] ^ ack_buf[2];
+            schedule_work(&ack_work);
+        }
     }
+
+    /* 다음 decay 예약 (1초 뒤) */
     schedule_delayed_work(&decay_work, HZ);
 }
 
@@ -159,6 +169,8 @@ static int rx_open(struct inode *inode, struct file *filp)
 {
     rx_active = 1;
     DBG("RX opened, FSM activated");
+    /* decay 루프 시작 */
+    schedule_delayed_work(&decay_work, HZ);
     return 0;
 }
 
@@ -166,6 +178,8 @@ static int rx_release(struct inode *inode, struct file *filp)
 {
     rx_active = 0;
     DBG("RX released, FSM deactivated");
+    /* decay 루프 중지 */
+    cancel_delayed_work_sync(&decay_work);
     return 0;
 }
 
@@ -180,14 +194,17 @@ static int __init rx_init(void)
 {
     int ret;
 
-    /* character device setup */
+    /* char device setup */
     ret = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
     if (ret < 0) return ret;
     cdev_init(&rx_cdev, &rx_fops);
     rx_cdev.owner = THIS_MODULE;
     ret = cdev_add(&rx_cdev, dev_num, 1);
     if (ret) return ret;
-    rx_class = class_create( CLASS_NAME);
+
+    /* class/device */
+    rx_class = class_create(CLASS_NAME);
+    if (IS_ERR(rx_class)) return PTR_ERR(rx_class);
     device_create(rx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
     /* GPIO setup */
@@ -203,8 +220,7 @@ static int __init rx_init(void)
     /* IRQ */
     irq_clk_tx = gpiod_to_irq(clk_in);
     ret = request_irq(irq_clk_tx, clk_tx_irq_handler,
-                      IRQF_TRIGGER_RISING,
-                      "clk_tx_irq", NULL);
+                      IRQF_TRIGGER_RISING, "clk_tx_irq", NULL);
     if (ret) {
         pr_err("[RX_DRV][ERROR] IRQ request failed: %d\n", ret);
         return ret;
@@ -213,18 +229,17 @@ static int __init rx_init(void)
     /* init workqueue for ACK */
     INIT_WORK(&ack_work, ack_work_fn);
 
-    /* decay delayed work */
+    /* init delayed work (but don't schedule here) */
     INIT_DELAYED_WORK(&decay_work, decay_function);
-    schedule_delayed_work(&decay_work, HZ);
-    last_recv_time = jiffies;
 
+    last_recv_time = jiffies;
     DBG("RX driver initialized");
     return 0;
 }
 
 static void __exit rx_exit(void)
 {
-    /* cancel pending work */
+    /* cancel any pending work */
     cancel_work_sync(&ack_work);
     cancel_delayed_work_sync(&decay_work);
 
