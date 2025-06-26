@@ -10,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/signal.h>
 #include <linux/poll.h>
+#include <linux/delay.h> 
 
 #define DEVICE_NAME "speed_ctrl_tx"
 #define CLASS_NAME  "sysprog_tx"
@@ -125,7 +126,7 @@ static int __init tx_init(void) {
     ret = cdev_add(&tx_cdev, dev_num, 1);
     if (ret) return ret;
 
-    tx_class = class_create(THIS_MODULE, CLASS_NAME);
+    tx_class = class_create(CLASS_NAME);
     device_create(tx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
     data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_OUT);

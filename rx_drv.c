@@ -10,6 +10,7 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
+#include <linux/delay.h> 
 
 #define DEVICE_NAME "speed_ctrl_rx"
 #define CLASS_NAME  "sysprog_rx"
@@ -160,7 +161,7 @@ static int __init rx_init(void) {
     ret = cdev_add(&rx_cdev, dev_num, 1);
     if (ret) return ret;
 
-    rx_class = class_create(THIS_MODULE, CLASS_NAME);
+    rx_class = class_create( CLASS_NAME);
     device_create(rx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
     data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_IN);
