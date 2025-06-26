@@ -2,7 +2,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/fs.h>               // fasync_helper, file_operations
+#include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
 #include <linux/interrupt.h>
@@ -18,7 +18,7 @@
 #define TX_CMD_DATA_PIN    4   // TX → RX 데이터
 #define TX_CMD_CLK_PIN    27   // TX → RX 클럭
 #define TX_ACK_DATA_PIN    6   // RX → TX 데이터
-#define TX_ACK_CLK_PIN    19  // RX → TX 클럭
+#define TX_ACK_CLK_PIN    19   // RX → TX 클럭
 
 static struct gpio_desc *g_tx_data, *g_tx_clk;
 static struct gpio_desc *g_ack_data, *g_ack_clk;
@@ -148,7 +148,7 @@ static int __init tx_drv_init(void)
     tx_cdev.owner = THIS_MODULE;
     ret = cdev_add(&tx_cdev, tx_devt, 1);
     if (ret) goto err_chrdev;
-    tx_class = class_create(THIS_MODULE, DEV_NAME);
+    tx_class = class_create(DEV_NAME);
     device_create(tx_class, NULL, tx_devt, NULL, DEV_NAME);
 
     pr_info("tx_drv loaded (BCM %d,%d→%d,%d), major=%d\n",

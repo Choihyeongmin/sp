@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <stdlib.h>
 
 #define DEV_PATH       "/dev/speed_ctrl"
 #define START_BYTE     0xA5
@@ -30,7 +31,6 @@ int main() {
     int fd = open(DEV_PATH, O_RDWR);
     if (fd < 0) { perror("open"); return 1; }
 
-    // SIGIO 설정
     fcntl(fd, F_SETOWN, getpid());
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_ASYNC);
     signal(SIGIO, sigio_handler);
