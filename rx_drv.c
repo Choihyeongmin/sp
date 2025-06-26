@@ -50,6 +50,7 @@ static unsigned long last_recv_time;
 static struct delayed_work decay_work;
 
 static void send_ack(void) {
+    msleep(1); // send_ack() 전에 삽입
     unsigned char ack[4];
 
     ack[0] = 0x55;
@@ -170,10 +171,10 @@ static int __init rx_init(void) {
     rx_class = class_create(CLASS_NAME);
     device_create(rx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
-    data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_IN);
-    clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_IN);
-    data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_OUT);
-    clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_OUT);
+    data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_IN); //17
+    clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_IN); //22
+    data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_OUT); // 5
+    clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_OUT); //21
 
     gpiod_direction_input(data_in);
     gpiod_direction_input(clk_in);

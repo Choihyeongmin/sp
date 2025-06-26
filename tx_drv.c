@@ -138,10 +138,10 @@ static int __init tx_init(void) {
     tx_class = class_create(CLASS_NAME);
     device_create(tx_class, NULL, dev_num, NULL, DEVICE_NAME);
 
-    data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_OUT);
-    clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_OUT);
-    data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_IN);
-    clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_IN);
+    data_out = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_TX_OUT); // 4
+    clk_out  = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_TX_OUT); // 27
+    data_in  = gpio_to_desc(GPIOCHIP_BASE + BCM_DATA_RX_IN); // 6
+    clk_in   = gpio_to_desc(GPIOCHIP_BASE + BCM_CLK_RX_IN); // 20
 
     gpiod_direction_output(data_out, 0);
     gpiod_direction_output(clk_out, 0);
