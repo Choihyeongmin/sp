@@ -98,7 +98,7 @@ static void handle_frame(unsigned char *frame) {
 static irqreturn_t clk_tx_irq_handler(int irq, void *dev_id) {
     if (!rx_active) return IRQ_HANDLED;
 
-    DBG("CLK IRQ: triggered");
+    DBG("First CLK IRQ: triggered");
 
     int bit = gpiod_get_value(data_in);
     int byte_idx = bit_pos / 8;
