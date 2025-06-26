@@ -49,7 +49,6 @@ static irqreturn_t clk_rx_irq_handler(int irq, void *dev_id) {
         DBG("bit_pos overflow, reset");
         return IRQ_HANDLED;
     }
-    udelay(20); // 🟡 신호 안정화 대기: RX에서 클럭 LOW→HIGH 후 TX가 읽을 여유
     DBG("Second CLK IRQ: triggered");
 
     int bit = gpiod_get_value(data_in);
